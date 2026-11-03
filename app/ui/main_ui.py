@@ -1,205 +1,609 @@
-import os.path
+"""Premium ReMemory AI desktop studio."""
+
+from pathlib import Path
 import sys
-from PyQt5.QtGui import QIcon, QFont, QPixmap, QImage
-from PyQt5.QtWidgets import QMainWindow, QApplication, QHBoxLayout, QVBoxLayout, QWidget, QPushButton, QGridLayout, \
-    QSpacerItem, QSizePolicy, QLabel, QFileDialog, QMessageBox
-from PyQt5.QtCore import Qt, QFile, QTextStream
+import time
+from typing import Optional
 
-from app.colorize import colorize
-from app.ui.components.backgroundwidget import BackgroundWidget
-import cv2
+from PIL import Image
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QIcon, QPixmap
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-class MainAppWindow(QMainWindow):
+from app.colorize import PROJECT_ROOT, colorize
+
+
+ASSET_ROOT = PROJECT_ROOT / "app" / "ui" / "assets"
+SAMPLE_ROOT = PROJECT_ROOT / "app" / "test"
+SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+SUPPORTED_FILTER = "Photographs (*.png *.jpg *.jpeg)"
+
+
+class ColorizeWorker(QThread):
+    completed = pyqtSignal(str, float)
+    failed = pyqtSignal(str)
+
+    def __init__(self, source: Path):
+        super().__init__()
+        self.source = source
+
+    def run(self) -> None:
+        started = time.perf_counter()
+        try:
+            output = colorize(self.source)
+            self.completed.emit(str(output), time.perf_counter() - started)
+        except (FileNotFoundError, RuntimeError, ValueError, OSError) as exc:
+            self.failed.emit(str(exc))
+
+
+class DropLabel(QLabel):
+    file_dropped = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
-        # vars
-        self.download_button = None
-        self.gl_image_filepath = None
-        self.gl_image = None
-        self.color_image = None
-        # set window properties
-        self.setWindowIcon(QIcon("assets/icon.ico"))
-        self.setGeometry(200, 200, 1400, 800)
-        self.setFixedSize(self.size())
-        self.setWindowTitle("Color Craft GAN")
+        self.setAcceptDrops(True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setObjectName("dropPreview")
 
-        # set main layout
-        main_layout = QHBoxLayout()
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
 
-        # create the main content area
-        self.main_content = BackgroundWidget()
-        self.main_content.setObjectName("main_content")
-        self.main_content.set_background_image("assets/component_bg/welcome_bg.png")
-        self.main_content_layout = QGridLayout()
-        self.main_content.setLayout(self.main_content_layout)
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                self.file_dropped.emit(url.toLocalFile())
+                break
 
-        main_layout.addWidget(self.main_content)
 
-        # button
-        continue_button = QPushButton("Colorise")
-        continue_button.setObjectName("continue_button")
-        continue_button.setFixedSize(220, 45)
-        continue_button.clicked.connect(self.show_colorize_page)
-        font = QFont("Arial", 15, QFont.Bold)
-        continue_button.setFont(font)
+class DropFrame(QFrame):
+    file_dropped = pyqtSignal(str)
 
-        # Add the button to the layout with specific positioning and alignment
-        self.main_content_layout.addWidget(continue_button, self.main_content_layout.rowCount() + 1, 1, 1, 1, Qt.AlignLeft | Qt.AlignBottom)
-        self.main_content_layout.setAlignment(continue_button, Qt.AlignLeft | Qt.AlignBottom)
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
 
-        # Add spacers to create space between button and bottom/left edges
-        self.main_content_layout.addItem(QSpacerItem(125, 0, QSizePolicy.Fixed, QSizePolicy.Minimum), self.main_content_layout.rowCount(), 0)
-        self.main_content_layout.addItem(QSpacerItem(0, 145, QSizePolicy.Minimum, QSizePolicy.Fixed), self.main_content_layout.rowCount() + 1, 0)
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
 
-        central_widget = QWidget()
-        central_widget.setObjectName("central_widget")
-        central_widget.setLayout(main_layout)
-        self.setCentralWidget(central_widget)
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                self.file_dropped.emit(url.toLocalFile())
+                break
 
-    def load_stylesheet(self):
-        stylesheet = QFile("Styles/style.qss")
-        if stylesheet.open(QFile.ReadOnly | QFile.Text):
-            stream = QTextStream(stylesheet)
-            self.setStyleSheet(stream.readAll())
 
-    def show_colorize_page(self):
-        self.gl_image_filepath = None
-        self.main_content.set_background_image("assets/component_bg/colorize_page_bg.png")
-        self.clear_main_layout()
+class MainWindow(QMainWindow):
+    """Main window containing the four ReMemory AI studio surfaces."""
 
-        v_layout = QVBoxLayout()
+    def __init__(self):
+        super().__init__()
+        self.source_path: Optional[Path] = None
+        self.output_path: Optional[Path] = None
+        self.worker: Optional[ColorizeWorker] = None
+        self.nav_buttons = []
+        self.setWindowTitle("ReMemory AI | AI Photo Restoration Studio")
+        self.setWindowIcon(QIcon(str(ASSET_ROOT / "icon.ico")))
+        self.setMinimumSize(980, 680)
+        self.resize(1240, 820)
 
-        title_label = QLabel("<H2>Image colorization  using GAN</H2>")
-        title_label.setAlignment(Qt.AlignTop)
-        title_label.setStyleSheet("font-size: 24px; color: #ffffff; margin-bottom: 20px;")
-        v_layout.addWidget(title_label)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._home_page())
+        self.pages.addWidget(self._colorize_page())
+        self.pages.addWidget(self._gallery_page())
+        self.pages.addWidget(self._about_page())
+        self.setCentralWidget(self._layout_with_navigation())
+        self._select_page(0)
 
-        model_path_label = QLabel("<h5>      Model Path: app/model/CCGAN_Model.h5</h5>")
-        model_path_label.setStyleSheet("font-size: 16px; color: #c6c6c6; margin-bottom: 20px;")
-        model_path_label.setAlignment(Qt.AlignCenter)
-        v_layout.addWidget(model_path_label)
+    def _layout_with_navigation(self) -> QWidget:
+        root = QWidget()
+        root.setObjectName("appRoot")
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(28, 20, 28, 18)
+        layout.setSpacing(18)
 
-        gpu_info_label = QLabel(
-            "<b><ul><li>Device: GPU:0 with 1654 MB memory</li><li>NVIDIA GeForce RTX 3050 Laptop GPU</li><li>Compute capability: 8.6</li><li>Loaded cuDNN version 8302</li></ul></b>")
-        gpu_info_label.setStyleSheet("font-size: 13px; color: #ffa6fa;")
-        gpu_info_label.setAlignment(Qt.AlignCenter)
-        v_layout.addWidget(gpu_info_label)
+        header = QFrame()
+        header.setObjectName("header")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 12, 18, 12)
 
-        h_layout_for_image_labels = QHBoxLayout()
+        logo = QLabel("R")
+        logo.setObjectName("logoMark")
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setFixedSize(38, 38)
+        header_layout.addWidget(logo)
 
-        gl_label = QLabel("Select Grey scale Image:")
-        gl_label.setAlignment(Qt.AlignCenter)
-        gl_label.setStyleSheet("font-size: 16px; color: #c6c6c6; margin-bottom: 10px; font-weight: bold;")
-        h_layout_for_image_labels.addWidget(gl_label)
+        brand_layout = QVBoxLayout()
+        brand_layout.setSpacing(0)
+        brand = QLabel("ReMemory AI")
+        brand.setObjectName("brand")
+        brand_layout.addWidget(brand)
+        tagline = QLabel("AI Photo Restoration Studio")
+        tagline.setObjectName("brandSubtitle")
+        brand_layout.addWidget(tagline)
+        header_layout.addLayout(brand_layout)
+        header_layout.addStretch()
 
-        color_label = QLabel("Color Image")
-        color_label.setAlignment(Qt.AlignCenter)
-        color_label.setStyleSheet("font-size: 16px; color: #6ce87d; margin-bottom: 10px; font-weight: bold;")
-        h_layout_for_image_labels.addWidget(color_label)
+        for label, page in (
+            ("Home", 0),
+            ("Colorize", 1),
+            ("Gallery", 2),
+            ("About", 3),
+        ):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setObjectName("navButton")
+            button.clicked.connect(lambda _, index=page: self._select_page(index))
+            self.nav_buttons.append(button)
+            header_layout.addWidget(button)
+        layout.addWidget(header)
+        layout.addWidget(self.pages, 1)
 
-        h_layout_for_image_labels_widget = QWidget()
-        h_layout_for_image_labels_widget.setLayout(h_layout_for_image_labels)
-        v_layout.addWidget(h_layout_for_image_labels_widget)
+        footer = QLabel("ReMemory AI  /  GAN-powered restoration  /  CPU compatible")
+        footer.setObjectName("footer")
+        layout.addWidget(footer)
+        return root
 
-        h_layout_for_images = QHBoxLayout()
+    def _select_page(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        for page, button in enumerate(self.nav_buttons):
+            button.setChecked(page == index)
 
-        # image display
-        self.gl_image = QLabel()
-        self.gl_image.setAlignment(Qt.AlignCenter)
-        pixmap = QPixmap("assets/image_dummies/grey_dummy.png")
-        self.gl_image.setPixmap(pixmap.scaled(256, 256, Qt.KeepAspectRatio))
-        h_layout_for_images.addWidget(self.gl_image)
+    @staticmethod
+    def _scroll_page(content: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(content)
+        return scroll
 
-        self.color_image = QLabel()
-        self.color_image.setAlignment(Qt.AlignCenter)
-        pixmap = QPixmap("assets/image_dummies/color_dummy.png")
-        self.color_image.setPixmap(pixmap.scaled(256, 256, Qt.KeepAspectRatio))
-        h_layout_for_images.addWidget(self.color_image)
+    @staticmethod
+    def _section_heading(title: str, subtitle: str) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 8)
+        layout.setSpacing(7)
+        title_label = QLabel(title)
+        title_label.setObjectName("pageTitle")
+        layout.addWidget(title_label)
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setObjectName("pageSubtitle")
+        subtitle_label.setWordWrap(True)
+        layout.addWidget(subtitle_label)
+        return widget
 
-        h_layout_for_images_widget = QWidget()
-        h_layout_for_images_widget.setLayout(h_layout_for_images)
-        v_layout.addWidget(h_layout_for_images_widget)
+    @staticmethod
+    def _button(text: str, object_name: str = "secondaryButton") -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName(object_name)
+        button.setCursor(Qt.PointingHandCursor)
+        return button
 
-        button_layout = QHBoxLayout()
-        button_font = QFont("Railway", 8, QFont.Bold)
+    @staticmethod
+    def _feature_card(title: str, description: str, accent: str) -> QFrame:
+        card = QFrame()
+        card.setObjectName("featureCard")
+        layout = QVBoxLayout(card)
+        icon = QLabel(accent)
+        icon.setObjectName("featureIcon")
+        layout.addWidget(icon)
+        title_label = QLabel(title)
+        title_label.setObjectName("cardTitle")
+        layout.addWidget(title_label)
+        description_label = QLabel(description)
+        description_label.setObjectName("cardBody")
+        description_label.setWordWrap(True)
+        layout.addWidget(description_label)
+        return card
 
-        clear_button = QPushButton("CLEAR")
-        clear_button.clicked.connect(lambda: self.show_colorize_page())
-        clear_button.setObjectName("buttons")
-        clear_button.setFont(button_font)
-        button_layout.addWidget(clear_button)
+    def _home_page(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(34, 30, 34, 34)
+        layout.setSpacing(24)
+        layout.addWidget(
+            self._section_heading(
+                "Bring Your Memories Back to Life",
+                "Transform black-and-white photographs into vibrant color memories using "
+                "Generative Adversarial Networks.",
+            )
+        )
 
-        browse_button = QPushButton("BROWSE")
-        browse_button.setObjectName("buttons")
-        browse_button.setFont(button_font)
-        browse_button.clicked.connect(lambda: self.browse_gl_image(self.gl_image))
-        button_layout.addWidget(browse_button)
+        actions = QHBoxLayout()
+        start = self._button("Start Colorizing  >", "primaryButton")
+        start.clicked.connect(lambda: self._select_page(1))
+        actions.addWidget(start)
+        gallery = self._button("Explore Gallery", "secondaryButton")
+        gallery.clicked.connect(lambda: self._select_page(2))
+        actions.addWidget(gallery)
+        actions.addStretch()
+        layout.addLayout(actions)
 
-        colorize_button = QPushButton("COLORIZE")
-        colorize_button.setObjectName("buttons")
-        colorize_button.setFont(button_font)
-        colorize_button.clicked.connect(lambda: self.colorize_image(self.color_image))
-        button_layout.addWidget(colorize_button)
+        showcase = QFrame()
+        showcase.setObjectName("showcaseCard")
+        showcase_layout = QHBoxLayout(showcase)
+        showcase_layout.setContentsMargins(22, 22, 22, 22)
+        showcase_layout.setSpacing(22)
+        for path, label in (
+            (ASSET_ROOT / "image_dummies" / "grey_dummy.png", "ORIGINAL"),
+            (ASSET_ROOT / "image_dummies" / "color_dummy.png", "STUDIO PREVIEW"),
+        ):
+            preview = QVBoxLayout()
+            caption = QLabel(label)
+            caption.setObjectName("eyebrow")
+            preview.addWidget(caption)
+            image = QLabel()
+            image.setAlignment(Qt.AlignCenter)
+            image.setPixmap(self._pixmap(path, 390, 230))
+            image.setMinimumHeight(230)
+            preview.addWidget(image)
+            showcase_layout.addLayout(preview, 1)
+        layout.addWidget(showcase)
 
-        self.download_button = QPushButton("DOWNLOAD")
-        self.download_button.setObjectName("download_button")
-        self.download_button.setFont(button_font)
+        features = QGridLayout()
+        features.setHorizontalSpacing(16)
+        features.setVerticalSpacing(16)
+        cards = (
+            ("GAN-Powered Colorization", "A trained generator creates a plausible RGB interpretation from grayscale input.", "01"),
+            ("Intelligent Color Generation", "Learned visual features guide natural color placement while preserving structure.", "02"),
+            ("Instant Photo Restoration", "A focused desktop workflow turns a selected photograph into a downloadable result.", "03"),
+        )
+        for column, card_data in enumerate(cards):
+            features.addWidget(self._feature_card(*card_data), 0, column)
+        layout.addLayout(features)
+        layout.addStretch()
+        return self._scroll_page(content)
+
+    def _colorize_page(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(34, 30, 34, 34)
+        layout.setSpacing(18)
+        layout.addWidget(
+            self._section_heading(
+                "Restore Your Memories",
+                "Upload an old photograph and let AI bring it back to life.",
+            )
+        )
+
+        upload = DropFrame()
+        upload.setObjectName("uploadCard")
+        upload_layout = QHBoxLayout(upload)
+        upload_layout.setContentsMargins(22, 18, 22, 18)
+        upload_icon = QLabel("+")
+        upload_icon.setObjectName("uploadIcon")
+        upload_icon.setAlignment(Qt.AlignCenter)
+        upload_icon.setFixedSize(50, 50)
+        upload_layout.addWidget(upload_icon)
+        instructions = QVBoxLayout()
+        upload_title = QLabel("Drop a photograph here")
+        upload_title.setObjectName("cardTitle")
+        instructions.addWidget(upload_title)
+        upload_hint = QLabel("PNG, JPG, or JPEG  /  Original proportions preserved")
+        upload_hint.setObjectName("cardBody")
+        instructions.addWidget(upload_hint)
+        upload_layout.addLayout(instructions, 1)
+        choose = self._button("Choose Photograph", "primaryButton")
+        choose.clicked.connect(self._choose_image)
+        upload_layout.addWidget(choose)
+        upload.file_dropped.connect(self._set_source)
+        layout.addWidget(upload)
+
+        previews = QHBoxLayout()
+        previews.setSpacing(16)
+        self.original_card, self.original_preview = self._preview_card("Original Photograph")
+        self.colorized_card, self.colorized_preview = self._preview_card("AI Colorized Result")
+        self.original_preview.file_dropped.connect(self._set_source)
+        previews.addWidget(self.original_card, 1)
+        previews.addWidget(self.colorized_card, 1)
+        layout.addLayout(previews)
+
+        actions = QHBoxLayout()
+        self.colorize_button = self._button("Colorize Image  >", "gradientButton")
+        self.colorize_button.clicked.connect(self._run_colorization)
+        actions.addWidget(self.colorize_button)
+        clear = self._button("Clear Workspace", "secondaryButton")
+        clear.clicked.connect(self._clear)
+        actions.addWidget(clear)
+        self.download_button = self._button("Download Colorized Image", "secondaryButton")
         self.download_button.setEnabled(False)
-        self.download_button.clicked.connect(lambda: self.download_image())
-        button_layout.addWidget(self.download_button)
+        self.download_button.clicked.connect(self._download)
+        actions.addWidget(self.download_button)
+        actions.addStretch()
+        layout.addLayout(actions)
 
-        button_layout_widget = QWidget()
-        button_layout_widget.setLayout(button_layout)
-        v_layout.addWidget(button_layout_widget)
+        status_row = QHBoxLayout()
+        self.spinner = QProgressBar()
+        self.spinner.setRange(0, 0)
+        self.spinner.setFixedWidth(150)
+        self.spinner.setVisible(False)
+        status_row.addWidget(self.spinner)
+        self.status = QLabel("Ready for a photograph")
+        self.status.setObjectName("status")
+        status_row.addWidget(self.status)
+        status_row.addStretch()
+        layout.addLayout(status_row)
+        layout.addStretch()
+        return self._scroll_page(content)
 
-        main_widget = QWidget()
-        main_widget.setLayout(v_layout)
-        self.main_content_layout.addWidget(main_widget)
+    def _preview_card(self, title: str):
+        card = QFrame()
+        card.setObjectName("previewCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        heading = QHBoxLayout()
+        label = QLabel(title)
+        label.setObjectName("cardTitle")
+        heading.addWidget(label)
+        heading.addStretch()
+        state = QLabel("WAITING")
+        state.setObjectName("stateLabel")
+        heading.addWidget(state)
+        layout.addLayout(heading)
+        preview = DropLabel()
+        preview.setMinimumHeight(280)
+        preview.setText("Drop your image here" if "Original" in title else "AI result will appear here")
+        layout.addWidget(preview, 1)
+        metadata = QLabel("No image selected")
+        metadata.setObjectName("metadata")
+        layout.addWidget(metadata)
+        card.metadata = metadata
+        card.state_label = state
+        return card, preview
 
-    def clear_main_layout(self):
-        while self.main_content_layout.count():
-            child = self.main_content_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+    def _gallery_page(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(34, 30, 34, 34)
+        layout.setSpacing(20)
+        layout.addWidget(
+            self._section_heading(
+                "Sample Gallery",
+                "Explore the same real GAN inference pipeline using photographs bundled with the project.",
+            )
+        )
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(16)
+        samples = (
+            ("Vintage Portraits", "Dog_GL.jpg"),
+            ("Historical Architecture", "building_GL.jpg"),
+        )
+        for index, (category, filename) in enumerate(samples):
+            grid.addWidget(self._sample_card(category, filename), 0, index)
+        for index, category in enumerate(("Family Photographs", "Nature and Landscapes")):
+            grid.addWidget(self._empty_sample_card(category), 1, index)
+        layout.addLayout(grid)
+        layout.addStretch()
+        return self._scroll_page(content)
 
-    def browse_gl_image(self, label):
-        file_dialog = QFileDialog()
-        gl_image_filepath, _ = file_dialog.getOpenFileName(self, "Select grey scale image")
-        if gl_image_filepath:
-            self.gl_image_filepath = gl_image_filepath
+    def _sample_card(self, category: str, filename: str) -> QFrame:
+        card = QFrame()
+        card.setObjectName("sampleCard")
+        layout = QVBoxLayout(card)
+        image = QLabel()
+        image.setAlignment(Qt.AlignCenter)
+        image.setPixmap(self._pixmap(SAMPLE_ROOT / filename, 360, 190))
+        layout.addWidget(image)
+        category_label = QLabel(category.upper())
+        category_label.setObjectName("eyebrow")
+        layout.addWidget(category_label)
+        name = QLabel(filename)
+        name.setObjectName("cardTitle")
+        layout.addWidget(name)
+        button = self._button("Colorize Sample", "secondaryButton")
+        button.clicked.connect(
+            lambda checked=False: self._colorize_sample(SAMPLE_ROOT / filename)
+        )
+        layout.addWidget(button)
+        return card
 
-            image = cv2.imread(gl_image_filepath)
-            gl_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            height, width = gl_image.shape
-            bytes_per_line = width
-            pixmap = QPixmap.fromImage(QImage(gl_image.data, width, height, bytes_per_line, QImage.Format_Grayscale8))
+    def _empty_sample_card(self, category: str) -> QFrame:
+        card = QFrame()
+        card.setObjectName("sampleCard emptyCard")
+        layout = QVBoxLayout(card)
+        layout.setAlignment(Qt.AlignCenter)
+        icon = QLabel("--")
+        icon.setObjectName("emptyIcon")
+        icon.setAlignment(Qt.AlignCenter)
+        layout.addWidget(icon)
+        label = QLabel(category.upper())
+        label.setObjectName("eyebrow")
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+        message = QLabel("Add a licensed sample to this category")
+        message.setObjectName("cardBody")
+        message.setAlignment(Qt.AlignCenter)
+        message.setWordWrap(True)
+        layout.addWidget(message)
+        return card
 
-            label.setPixmap(pixmap.scaled(256, 256, Qt.KeepAspectRatio))
+    def _about_page(self) -> QWidget:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(34, 30, 34, 34)
+        layout.setSpacing(18)
+        layout.addWidget(
+            self._section_heading(
+                "About ReMemory AI",
+                "A transparent, compact GAN workflow for restoring the feeling in old photographs.",
+            )
+        )
+        overview = QFrame()
+        overview.setObjectName("aboutCard")
+        overview_layout = QVBoxLayout(overview)
+        overview_layout.addWidget(QLabel("THE STUDIO", objectName="eyebrow"))
+        body = QLabel(
+            "ReMemory AI converts a grayscale photograph into a plausible RGB image "
+            "with the bundled trained generator. It preserves the original architecture: "
+            "the generator learns color mappings, while the discriminator learns to "
+            "distinguish real RGB images from generated ones during training."
+        )
+        body.setObjectName("cardBody")
+        body.setWordWrap(True)
+        overview_layout.addWidget(body)
+        layout.addWidget(overview)
 
-    def colorize_image(self, label):
-        if self.gl_image_filepath is None:
-            QMessageBox.information(self, "Error", "Please select the grey image")
+        cards = QGridLayout()
+        cards.setHorizontalSpacing(16)
+        cards.setVerticalSpacing(16)
+        cards.addWidget(self._technical_card("Generator", "120x120x1 input -> convolutional blocks -> skip connections -> transposed convolutions -> 120x120x3 RGB output."), 0, 0)
+        cards.addWidget(self._technical_card("Discriminator", "Convolution and pooling blocks classify real versus generated 120x120 RGB images with a sigmoid output."), 0, 1)
+        cards.addWidget(self._technical_card("Training workflow", "Paired RGB images are converted to grayscale. MSE guides the generator and binary cross-entropy trains the discriminator with Adam."), 1, 0)
+        cards.addWidget(self._technical_card("Limitations", "Generated colors are plausible, not historical truth. The compact model uses fixed 120-pixel inference and may miss fine detail."), 1, 1)
+        layout.addLayout(cards)
+        tech = QLabel("Python  /  TensorFlow & Keras  /  PyQt5  /  Pillow  /  NumPy")
+        tech.setObjectName("technologyLine")
+        layout.addWidget(tech)
+        layout.addStretch()
+        return self._scroll_page(content)
+
+    @staticmethod
+    def _technical_card(title: str, body: str) -> QFrame:
+        card = QFrame()
+        card.setObjectName("technicalCard")
+        layout = QVBoxLayout(card)
+        title_label = QLabel(title)
+        title_label.setObjectName("cardTitle")
+        layout.addWidget(title_label)
+        body_label = QLabel(body)
+        body_label.setObjectName("cardBody")
+        body_label.setWordWrap(True)
+        layout.addWidget(body_label)
+        return card
+
+    @staticmethod
+    def _pixmap(path: Path, width: int, height: int) -> QPixmap:
+        return QPixmap(str(path)).scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def _choose_image(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(self, "Choose a photograph", "", SUPPORTED_FILTER)
+        if filename:
+            self._set_source(filename)
+
+    def _colorize_sample(self, path: Path) -> None:
+        self._select_page(1)
+        self._set_source(str(path))
+        self._run_colorization()
+
+    def _set_source(self, filename: str) -> None:
+        path = Path(filename)
+        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            QMessageBox.warning(self, "Unsupported file", "Choose a PNG, JPG, or JPEG photograph.")
             return
-        color_image_filepath = colorize(self.gl_image_filepath)
+        try:
+            with Image.open(path) as image:
+                image.verify()
+            with Image.open(path) as image:
+                dimensions = image.size
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "Invalid image", "The selected file is not a readable image.")
+            return
+        self.source_path = path
+        self.output_path = None
+        self.original_preview.setPixmap(self._pixmap(path, 520, 360))
+        self.original_preview.setText("")
+        self.original_card.metadata.setText(f"{path.name}  /  {dimensions[0]} x {dimensions[1]} px")
+        self.original_card.state_label.setText("LOADED")
+        self.colorized_preview.clear()
+        self.colorized_preview.setText("Ready to colorize")
+        self.colorized_card.metadata.setText("Waiting for generator inference")
+        self.colorized_card.state_label.setText("WAITING")
+        self.download_button.setEnabled(False)
+        self.status.setText(f"Selected {path.name}")
 
-        if os.path.exists(color_image_filepath):
-            print(f"Image saved to {color_image_filepath}")
-            pixmap = QPixmap(color_image_filepath).scaled(256, 256, Qt.KeepAspectRatio)
-            label.setPixmap(pixmap)
-            self.download_button.setEnabled(True)
-        else:
-            QMessageBox.critical(self, "Error", "Failed to colorize the image")
+    def _run_colorization(self) -> None:
+        if self.source_path is None:
+            QMessageBox.information(self, "Choose a photograph", "Select or drop a photograph first.")
+            return
+        if self.worker and self.worker.isRunning():
+            return
+        self.colorize_button.setEnabled(False)
+        self.download_button.setEnabled(False)
+        self.spinner.setVisible(True)
+        self.colorized_card.state_label.setText("PROCESSING")
+        self.status.setText("Running generator inference...")
+        self.worker = ColorizeWorker(self.source_path)
+        self.worker.completed.connect(self._colorization_completed)
+        self.worker.failed.connect(self._colorization_failed)
+        self.worker.start()
 
-    def download_image(self):
-        QMessageBox.information(self, "Download", "Downloaded the image...")
+    def _colorization_completed(self, filename: str, duration: float) -> None:
+        self.output_path = Path(filename)
+        with Image.open(self.output_path) as image:
+            dimensions = image.size
+        self.colorized_preview.setPixmap(self._pixmap(self.output_path, 520, 360))
+        self.colorized_preview.setText("")
+        self.colorized_card.metadata.setText(f"{dimensions[0]} x {dimensions[1]} px  /  RGB")
+        self.colorized_card.state_label.setText("COMPLETE")
+        self.download_button.setEnabled(True)
+        self.colorize_button.setEnabled(True)
+        self.spinner.setVisible(False)
+        self.status.setText(f"Colorization complete in {duration:.2f} seconds")
+
+    def _colorization_failed(self, message: str) -> None:
+        self.colorize_button.setEnabled(True)
+        self.spinner.setVisible(False)
+        self.colorized_card.state_label.setText("ERROR")
+        self.status.setText("Colorization failed")
+        QMessageBox.critical(self, "Colorization error", message)
+
+    def _clear(self) -> None:
+        self.source_path = None
+        self.output_path = None
+        self.original_preview.clear()
+        self.original_preview.setText("Drop your image here")
+        self.original_card.metadata.setText("No image selected")
+        self.original_card.state_label.setText("WAITING")
+        self.colorized_preview.clear()
+        self.colorized_preview.setText("AI result will appear here")
+        self.colorized_card.metadata.setText("No image selected")
+        self.colorized_card.state_label.setText("WAITING")
+        self.download_button.setEnabled(False)
+        self.status.setText("Ready for a photograph")
+
+    def _download(self) -> None:
+        if self.output_path is None:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save colorized image", self.output_path.name, "PNG image (*.png)"
+        )
+        if filename:
+            try:
+                destination = Path(filename)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(self.output_path.read_bytes())
+            except OSError as exc:
+                QMessageBox.critical(self, "Save error", str(exc))
+            else:
+                self.status.setText(f"Saved colorized image to {filename}")
+                QMessageBox.information(self, "Download complete", "Your colorized image was saved successfully.")
 
 
-try:
+def main() -> None:
     app = QApplication(sys.argv)
-    app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    window = MainAppWindow()
-    window.load_stylesheet()
+    app.setStyleSheet((PROJECT_ROOT / "app" / "ui" / "Styles" / "style.qss").read_text())
+    window = MainWindow()
     window.show()
     sys.exit(app.exec_())
-except Exception as e:
-    print(e)
+
+
+if __name__ == "__main__":
+    main()

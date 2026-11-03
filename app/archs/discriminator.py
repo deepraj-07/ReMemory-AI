@@ -1,9 +1,9 @@
 import tensorflow as tf
 
 
-def get_discriminator_model():
+def get_discriminator_model(img_size=120):
     layers = [
-        tf.keras.layers.Conv2D(32, kernel_size=(7, 7), strides=1, activation='relu', input_shape=(120, 120, 3)),
+        tf.keras.layers.Conv2D(32, kernel_size=(7, 7), strides=1, activation='relu', input_shape=(img_size, img_size, 3)),
         tf.keras.layers.Conv2D(32, kernel_size=(7, 7), strides=1, activation='relu'),
         tf.keras.layers.MaxPooling2D(),
         tf.keras.layers.Conv2D(64, kernel_size=(5, 5), strides=1, activation='relu'),

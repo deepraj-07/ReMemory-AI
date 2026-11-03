@@ -1,5 +1,4 @@
 import tensorflow as tf
-from tensorflow import keras
 
 
 def get_generator_model(img_size):
@@ -45,4 +44,3 @@ def get_generator_model(img_size):
 
     model = tf.keras.models.Model(inputs, conv_up_1)
     return model
-

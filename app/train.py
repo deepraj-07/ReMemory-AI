@@ -2,11 +2,10 @@ from PIL import Image
 from sklearn.model_selection import train_test_split
 import tensorflow as tf
 import numpy as np
-from matplotlib import image
-from matplotlib import pyplot as plt
 import os
+from pathlib import Path
 from tensorflow.keras.losses import BinaryCrossentropy, MeanSquaredError
-from tensorflow.python.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.callbacks import ModelCheckpoint
 
 from app.archs.generator import get_generator_model
 from app.archs.discriminator import get_discriminator_model
@@ -14,11 +13,17 @@ from app.archs.discriminator import get_discriminator_model
 gpus = tf.config.list_physical_devices('GPU')
 print(gpus)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 batch_size = 5
 img_size = 120
 dataset_split = 2500
 
-master_dir = "data"
+master_dir = PROJECT_ROOT / "data"
+if not master_dir.is_dir():
+    raise FileNotFoundError(
+        f"Training data is missing: {master_dir}. "
+        "Place the paired RGB training images in data/ before training."
+    )
 x = []
 y = []
 for image_file in os.listdir(master_dir)[0: dataset_split]:
@@ -61,7 +66,7 @@ generator_optimizer = tf.keras.optimizers.Adam(0.0005)
 discriminator_optimizer = tf.keras.optimizers.Adam(0.0005)
 
 generator = get_generator_model(img_size)
-discriminator = get_discriminator_model()
+discriminator = get_discriminator_model(img_size)
 
 
 @tf.function
@@ -89,11 +94,11 @@ def train_step(input_x, real_y):
 
 
 # Create a directory to save the model checkpoints
-checkpoint_dir = 'checkpoints/'
+checkpoint_dir = PROJECT_ROOT / "app" / "checkpoints"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # Define the checkpoint file path and settings
-checkpoint_path = checkpoint_dir + 'model_checkpoint.h5'
+checkpoint_path = checkpoint_dir / "model_checkpoint.h5"
 checkpoint_callback = ModelCheckpoint(
     filepath=checkpoint_path,
     save_weights_only=True,
@@ -113,4 +118,4 @@ for e in range(num_epochs):
     generator.save_weights(checkpoint_path)
 
 # Final save of the model
-generator.save('CCGAN_Model.h5')
+generator.save(PROJECT_ROOT / "app" / "model" / "CCGAN_Model.h5")

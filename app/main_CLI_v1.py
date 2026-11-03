@@ -1,11 +1,23 @@
-from tkinter import filedialog
+"""Command-line entry point for ReMemory AI."""
+
+import argparse
+
 from app.colorize import colorize
 
 
-print("Color-Craft-GAN CLI")
-try:
-    image_filepath = filedialog.askopenfilename(title='Select grey scale image')
-    colorized_image_filepath = colorize(image_filepath)
-    print(f"Colorized image saved at: {colorized_image_filepath}")
-except():
-    print("Error occurred")
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Colorize a grayscale photograph with the ReMemory AI GAN."
+    )
+    parser.add_argument("image", help="Path to a PNG, JPG, or JPEG image")
+    parser.add_argument(
+        "--output", help="Optional output path (PNG is recommended)", default=None
+    )
+    args = parser.parse_args()
+
+    output = colorize(args.image, args.output)
+    print(f"Colorized image saved to: {output}")
+
+
+if __name__ == "__main__":
+    main()
